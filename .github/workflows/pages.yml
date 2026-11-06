@@ -1,0 +1,64 @@
+name: Test and publish Vorlovka
+on:
+  push:
+    branches: [main]
+    paths: ['project.zip', '.github/workflows/pages.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+jobs:
+  verify-build-deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Unpack source
+        run: unzip -q project.zip
+      - name: Optimize local fonts
+        run: |
+          python -m pip install fonttools brotli
+          for font in web/public/fonts/*.ttf; do
+            pyftsubset "$font" --unicodes='U+0000-024F,U+1E00-1EFF,U+2000-206F,U+20AC,U+2190-21FF' --flavor=woff2 --output-file="${font%.ttf}.woff2"
+          done
+          sed -i "s/\.ttf/\.woff2/g; s/truetype/woff2/g" web/src/styles/site.css
+      - name: Install, type-check and build Astro
+        working-directory: web
+        run: |
+          npm install --no-audit --no-fund
+          npm run check
+          npm run build
+      - name: Browser and accessibility checks at nine viewport sizes
+        working-directory: web
+        env:
+          CHROME_PATH: /usr/bin/google-chrome
+        run: |
+          npm run preview -- --port 4321 > /tmp/vorlovka-preview.log 2>&1 &
+          for attempt in $(seq 1 30); do curl -fsS http://127.0.0.1:4321/vorlovka/ >/dev/null && break; sleep 1; done
+          node qa/verify.mjs
+      - name: Lighthouse mobile report
+        working-directory: web
+        run: |
+          npx lighthouse http://127.0.0.1:4321/vorlovka/ --chrome-flags="--headless --no-sandbox" --output=html --output=json --output-path=qa-results/lighthouse --quiet
+          node -e "const r=require('./qa-results/lighthouse.report.json'); console.log('performance',r.categories.performance.score,'accessibility',r.categories.accessibility.score); if(r.categories.performance.score<.9||r.categories.accessibility.score<.95)process.exit(1)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vorlovka-browser-evidence
+          path: web/qa-results
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: web/dist
+      - name: Deploy verified website
+        id: deployment
+        uses: actions/deploy-pages@v4
